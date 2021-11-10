@@ -18,7 +18,7 @@
 #define REPORT_SIZE		30
 #define REPORT_DATA_MAX_LEN	25
 #define HWID_LEN		8
-#define END_OF_TRANSFER_CHAR	'\n'
+#define END_OF_TRANSFER_CHAR	0x0a
 
 #define FU_NORDIC_DEVICE_CFG_CHANNEL_RETRIES 5
 #define FU_NORDIC_DEVICE_CFG_CHANNEL_RETRY_DELAY 100 /* ms */
@@ -126,8 +126,8 @@ fu_nordic_device_cfg_channel_receive(FuNordicDeviceCfgChannel *self,
 	return TRUE;
 #else
 	g_set_error_literal(error,
-			    G_IO_ERROR,
-			    G_IO_ERROR_NOT_SUPPORTED,
+			    FWUPD_ERROR,
+			    FWUPD_ERROR_NOT_SUPPORTED,
 			    "<linux/hidraw.h> not available");
 	return FALSE;
 #endif
@@ -237,7 +237,6 @@ fu_nordic_device_cfg_channel_load_module_opts(FuNordicDeviceCfgChannel *self,
 {
 	g_autoptr(FuNordicCfgChannelMsg) msg = g_new0(FuNordicCfgChannelMsg, 1);
 	g_autoptr(FuNordicCfgChannelMsg) res = g_new0(FuNordicCfgChannelMsg, 1);
-	FuNordicCfgChannelRcvHelper helper;
 	guint i = 1; /* initial module idx */
 
 	while (TRUE) {
@@ -258,8 +257,8 @@ fu_nordic_device_cfg_channel_load_module_opts(FuNordicDeviceCfgChannel *self,
 		res_aux->report_id = HID_REPORT_ID;
 		helper_aux.check_status = TRUE;
 		helper_aux.status = CFG_STATUS_SUCCESS;
-		helper_aux.buf = (guint8 *)res;
-		helper_aux.size = sizeof(*res);
+		helper_aux.buf = (guint8 *)res_aux;
+		helper_aux.size = sizeof(*res_aux);
 		if (!fu_device_retry(FU_DEVICE(self),
 				     fu_nordic_device_cfg_channel_receive_cb,
 				     FU_NORDIC_DEVICE_CFG_CHANNEL_RETRIES,
@@ -278,36 +277,6 @@ fu_nordic_device_cfg_channel_load_module_opts(FuNordicDeviceCfgChannel *self,
 		i++;
 	}
 
-	msg->report_id = HID_REPORT_ID;
-	msg->recipient = 0;
-	msg->event_id = mod->idx << 4;
-	msg->status = CFG_STATUS_FETCH;
-	msg->data_len = 0;
-	if (!fu_nordic_device_cfg_channel_send(self, (guint8 *)msg, sizeof(*msg), error)) {
-		g_prefix_error(error, "Failed to get module info for %s (send): ", mod->name);
-		return FALSE;
-	}
-	res->report_id = HID_REPORT_ID;
-	helper.check_status = TRUE;
-	helper.status = CFG_STATUS_SUCCESS;
-	helper.buf = (guint8 *)res;
-	helper.size = sizeof(*res);
-	if (!fu_device_retry(FU_DEVICE(self),
-			     fu_nordic_device_cfg_channel_receive_cb,
-			     FU_NORDIC_DEVICE_CFG_CHANNEL_RETRIES,
-			     &helper,
-			     error)) {
-		g_prefix_error(error, "Failed to get dev name (receive): ");
-		return FALSE;
-	}
-	if (g_strcmp0((gchar *)res->data, mod->name) != 0) {
-		g_set_error_literal(error,
-				    FWUPD_ERROR,
-				    FWUPD_ERROR_READ,
-				    "Unexpected reply");
-		return FALSE;
-	}
-
 	return TRUE;
 }
 
@@ -316,42 +285,45 @@ fu_nordic_device_cfg_channel_load_module_info(FuNordicDeviceCfgChannel *self,
 					      guint8 module_idx,
 					      GError **error)
 {
-	g_autoptr(FuNordicCfgChannelMsg) msg = g_new0(FuNordicCfgChannelMsg, 1);
-	g_autoptr(FuNordicCfgChannelMsg) res = g_new0(FuNordicCfgChannelMsg, 1);
 	FuNordicCfgChannelModule *mod = g_new0(FuNordicCfgChannelModule, 1);
-	FuNordicCfgChannelRcvHelper helper;
+	FuNordicCfgChannelModuleOption *opt = NULL;
 
-	msg->report_id = HID_REPORT_ID;
-	msg->recipient = 0;
-	msg->event_id = module_idx << 4;
-	msg->status = CFG_STATUS_FETCH;
-	msg->data_len = 0;
-	if (!fu_nordic_device_cfg_channel_send(self, (guint8 *)msg, sizeof(*msg), error)) {
-		g_prefix_error(error, "Failed to get module name (send): ");
-		return FALSE;
-	}
-	res->report_id = HID_REPORT_ID;
-	helper.check_status = TRUE;
-	helper.status = CFG_STATUS_SUCCESS;
-	helper.buf = (guint8 *)res;
-	helper.size = sizeof(*res);
-	if (!fu_device_retry(FU_DEVICE(self),
-			     fu_nordic_device_cfg_channel_receive_cb,
-			     FU_NORDIC_DEVICE_CFG_CHANNEL_RETRIES,
-			     &helper,
-			     error)) {
-		g_prefix_error(error, "Failed to get module name (receive): ");
-		return FALSE;
-	}
-	/* res->data: module name */
-	mod->name = g_strndup((gchar *)res->data, res->data_len);
 	mod->idx = module_idx;
 	mod->options = g_ptr_array_new();
 	if (!fu_nordic_device_cfg_channel_load_module_opts(self, mod, error))
 		return FALSE;
+	/* Module description is the 1-st loaded option */
+	if (mod->options->len > 0) {
+		opt = g_ptr_array_index(mod->options, 0);
+		mod->name = g_strdup(opt->name);
+		if (!g_ptr_array_remove(mod->options, opt))
+			g_set_error_literal(error,
+					    FWUPD_ERROR,
+					    FWUPD_ERROR_INTERNAL,
+					    "Unexpected internal error");
+	}
+
 	g_ptr_array_add(self->modules, mod);
 
 	return TRUE;
+}
+
+/* TODO: remove */
+static void
+print_opt_cb(gpointer data, gpointer user_data)
+{
+	FuNordicCfgChannelModuleOption *opt = data;
+	g_debug("  Option %d: %s", opt->idx, opt->name);
+}
+
+/* TODO: remove */
+static void
+print_mod_cb(gpointer data, gpointer user_data)
+{
+	FuNordicCfgChannelModule *mod = data;
+
+	g_debug("Module %d: '%s' with %u options:", mod->idx, mod->name, mod->options->len);
+	g_ptr_array_foreach(mod->options, print_opt_cb, NULL);
 }
 
 static gboolean
@@ -385,12 +357,14 @@ fu_nordic_device_cfg_channel_get_modinfo(FuNordicDeviceCfgChannel *self,
 		return FALSE;
 	}
 	/* res->data[0]: maximum module idx */
-	self->modules = g_ptr_array_sized_new(res->data[0] + 1);
-	for (guint i = 0; i < res->data[0]; i++) {
+	self->modules = g_ptr_array_new();
+	for (guint i = 0; i <= res->data[0]; i++) {
 		if (!fu_nordic_device_cfg_channel_load_module_info(self, i, error))
 			return FALSE;
 	}
 
+	/* TODO: remove */
+	g_ptr_array_foreach(self->modules, print_mod_cb, NULL);
 	return TRUE;
 }
 
@@ -418,6 +392,14 @@ fu_nordic_device_cfg_channel_setup(FuDevice *device, GError **error)
 		return FALSE;
 
 	return TRUE;
+}
+
+static void
+fu_nordic_device_cfg_channel_to_string(FuDevice *device, guint idt, GString *str)
+{
+	FuNordicDeviceCfgChannel *self = FU_NORDIC_DEVICE_CFG_CHANNEL(device);
+
+	fu_common_string_append_kv(str, idt, "BoardName", self->board_name);
 }
 
 static void
@@ -456,6 +438,7 @@ fu_nordic_device_cfg_channel_class_init(FuNordicDeviceCfgChannelClass *klass)
 
 	klass_device->probe = fu_nordic_device_cfg_channel_probe;
 	klass_device->setup = fu_nordic_device_cfg_channel_setup;
+	klass_device->to_string = fu_nordic_device_cfg_channel_to_string;
 	object_class->finalize = fu_nordic_device_cfg_channel_finalize;
 }
 
