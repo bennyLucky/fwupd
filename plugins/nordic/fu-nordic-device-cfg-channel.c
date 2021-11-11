@@ -24,20 +24,20 @@
 #define FU_NORDIC_DEVICE_CFG_CHANNEL_RETRY_DELAY 100 /* ms */
 
 typedef enum {
-	CFG_STATUS_PENDING,
-	CFG_STATUS_GET_MAX_MOD_ID,
-	CFG_STATUS_GET_HWID,
-	CFG_STATUS_GET_BOARD_NAME,
-	CFG_STATUS_INDEX_PEERS,
-	CFG_STATUS_GET_PEER,
-	CFG_STATUS_SET,
-	CFG_STATUS_FETCH,
-	CFG_STATUS_SUCCESS,
-	CFG_STATUS_TIMEOUT,
-	CFG_STATUS_REJECT,
-	CFG_STATUS_WRITE_FAIL,
-	CFG_STATUS_DISCONNECTED,
-	CFG_STATUS_FAULT = 99,
+	CONFIG_STATUS_PENDING,
+	CONFIG_STATUS_GET_MAX_MOD_ID,
+	CONFIG_STATUS_GET_HWID,
+	CONFIG_STATUS_GET_BOARD_NAME,
+	CONFIG_STATUS_INDEX_PEERS,
+	CONFIG_STATUS_GET_PEER,
+	CONFIG_STATUS_SET,
+	CONFIG_STATUS_FETCH,
+	CONFIG_STATUS_SUCCESS,
+	CONFIG_STATUS_TIMEOUT,
+	CONFIG_STATUS_REJECT,
+	CONFIG_STATUS_WRITE_FAIL,
+	CONFIG_STATUS_DISCONNECTED,
+	CONFIG_STATUS_FAULT = 99,
 } FuNordicCfStatus;
 
 typedef struct __attribute__((packed)) {
@@ -166,7 +166,7 @@ fu_nordic_device_cfg_channel_get_board_name(FuNordicDeviceCfgChannel *self,
 	msg->report_id = HID_REPORT_ID;
 	msg->recipient = 0;
 	msg->event_id = 0;
-	msg->status = CFG_STATUS_GET_BOARD_NAME;
+	msg->status = CONFIG_STATUS_GET_BOARD_NAME;
 	msg->data_len = 0;
 	if (!fu_nordic_device_cfg_channel_send(self, (guint8 *)msg, sizeof(*msg), error)) {
 		g_prefix_error(error, "Failed to get dev name (send): ");
@@ -174,7 +174,7 @@ fu_nordic_device_cfg_channel_get_board_name(FuNordicDeviceCfgChannel *self,
 	}
 	res->report_id = HID_REPORT_ID;
 	helper.check_status = TRUE;
-	helper.status = CFG_STATUS_SUCCESS;
+	helper.status = CONFIG_STATUS_SUCCESS;
 	helper.buf = (guint8 *)res;
 	helper.size = sizeof(*res);
 	if (!fu_device_retry(FU_DEVICE(self),
@@ -206,7 +206,7 @@ fu_nordic_device_cfg_channel_get_hwid(FuNordicDeviceCfgChannel *self,
 	msg->report_id = HID_REPORT_ID;
 	msg->recipient = 0;
 	msg->event_id = 0;
-	msg->status = CFG_STATUS_GET_HWID;
+	msg->status = CONFIG_STATUS_GET_HWID;
 	msg->data_len = 0;
 	if (!fu_nordic_device_cfg_channel_send(self, (guint8 *)msg, sizeof(*msg), error)) {
 		g_prefix_error(error, "Failed to get hwid (send): ");
@@ -214,7 +214,7 @@ fu_nordic_device_cfg_channel_get_hwid(FuNordicDeviceCfgChannel *self,
 	}
 	res->report_id = HID_REPORT_ID;
 	helper.check_status = TRUE;
-	helper.status = CFG_STATUS_SUCCESS;
+	helper.status = CONFIG_STATUS_SUCCESS;
 	helper.buf = (guint8 *)res;
 	helper.size = sizeof(*res);
 	if (!fu_device_retry(FU_DEVICE(self),
@@ -248,7 +248,7 @@ fu_nordic_device_cfg_channel_load_module_opts(FuNordicDeviceCfgChannel *self,
 		msg_aux->report_id = HID_REPORT_ID;
 		msg_aux->recipient = 0;
 		msg_aux->event_id = mod->idx << 4;
-		msg_aux->status = CFG_STATUS_FETCH;
+		msg_aux->status = CONFIG_STATUS_FETCH;
 		msg_aux->data_len = 0;
 		if (!fu_nordic_device_cfg_channel_send(self, (guint8 *)msg_aux, sizeof(*msg_aux), error)) {
 			g_prefix_error(error, "Failed to get module info for %s (send): ", mod->name);
@@ -256,7 +256,7 @@ fu_nordic_device_cfg_channel_load_module_opts(FuNordicDeviceCfgChannel *self,
 		}
 		res_aux->report_id = HID_REPORT_ID;
 		helper_aux.check_status = TRUE;
-		helper_aux.status = CFG_STATUS_SUCCESS;
+		helper_aux.status = CONFIG_STATUS_SUCCESS;
 		helper_aux.buf = (guint8 *)res_aux;
 		helper_aux.size = sizeof(*res_aux);
 		if (!fu_device_retry(FU_DEVICE(self),
@@ -337,7 +337,7 @@ fu_nordic_device_cfg_channel_get_modinfo(FuNordicDeviceCfgChannel *self,
 	msg->report_id = HID_REPORT_ID;
 	msg->recipient = 0;
 	msg->event_id = 0;
-	msg->status = CFG_STATUS_GET_MAX_MOD_ID;
+	msg->status = CONFIG_STATUS_GET_MAX_MOD_ID;
 	msg->data_len = 0;
 	if (!fu_nordic_device_cfg_channel_send(self, (guint8 *)msg, sizeof(*msg), error)) {
 		g_prefix_error(error, "Failed to get number of modules (send): ");
@@ -345,7 +345,7 @@ fu_nordic_device_cfg_channel_get_modinfo(FuNordicDeviceCfgChannel *self,
 	}
 	res->report_id = HID_REPORT_ID;
 	helper.check_status = TRUE;
-	helper.status = CFG_STATUS_SUCCESS;
+	helper.status = CONFIG_STATUS_SUCCESS;
 	helper.buf = (guint8 *)res;
 	helper.size = sizeof(*res);
 	if (!fu_device_retry(FU_DEVICE(self),
