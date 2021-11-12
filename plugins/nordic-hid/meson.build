@@ -1,18 +1,18 @@
 if get_option('gudev') and get_option('gusb')
-cargs = ['-DG_LOG_DOMAIN="FuPluginNordic"']
+cargs = ['-DG_LOG_DOMAIN="FuPluginNordicHid"']
 
 install_data([
-  'nordic.quirk',
+  'nordic-hid.quirk',
   ],
   install_dir: join_paths(datadir, 'fwupd', 'quirks.d')
 )
 
 
-shared_module('fu_plugin_nordic',
+shared_module('fu_plugin_nordic_hid',
   fu_hash,
   sources : [
-    'fu-plugin-nordic.c',
-    'fu-nordic-device-cfg-channel.c',
+    'fu-plugin-nordic-hid.c',
+    'fu-nordic-hid-cfg-channel.c',
   ],
   include_directories : [
     root_incdir,
