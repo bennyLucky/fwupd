@@ -57,6 +57,7 @@ typedef struct {
 typedef struct {
 	guint8 idx;
 	gchar* name;
+	/* TODO: refactor to GHashTable? */
 	GPtrArray *options; /* of FuNordicCfgChannelModuleOption */
 } FuNordicCfgChannelModule;
 
@@ -73,6 +74,13 @@ struct _FuNordicDeviceCfgChannel {
 	FuUdevDevice parent_instance;
 	gchar *board_name;
 	guint8 hw_id[HWID_LEN];
+	guint8 flash_area_id;
+	guint32 flashed_image_len;
+	guint8 ver_major;
+	guint8 ver_minor;
+	guint16 ver_rev;
+	guint32 ver_build_nr;
+	/* TODO: refactor to GHashTable? */
 	GPtrArray *modules; /* of FuNordicCfgChannelModule */
 };
 
@@ -114,7 +122,7 @@ fu_nordic_hid_cfg_channel_receive(FuNordicDeviceCfgChannel *self,
 	if (!fu_udev_device_ioctl(FU_UDEV_DEVICE(self), HIDIOCGFEATURE(size), buf, NULL, error)) {
 		return FALSE;
 	}
-	if (g_getenv("FWUPD_NORDIC_VERBOSE") != NULL)
+	if (g_getenv("FWUPD_NORDIC_HID_VERBOSE") != NULL)
 		fu_common_dump_raw(G_LOG_DOMAIN, "Received", buf, size);
 	/*
 	 * [TODO]: Possibly add the report-id fix for Bluez versions < 5.56:
@@ -155,26 +163,121 @@ fu_nordic_hid_cfg_channel_receive_cb(FuDevice *device, gpointer user_data, GErro
 	return TRUE;
 }
 
+/*
+ * fu_nordic_hid_cfg_channel_get_event_id:
+ * @module_name: module name, NULL for generic operations
+ * @option_name: option name, NULL for generic module operations
+ *
+ * Construct Event ID from module and option names.
+ *
+ * Returns: %TRUE if module/option pair found
+ */
 static gboolean
-fu_nordic_hid_cfg_channel_get_board_name(FuNordicDeviceCfgChannel *self,
-					    GError **error)
+fu_nordic_hid_cfg_channel_get_event_id(FuNordicDeviceCfgChannel *self,
+				       const gchar *module_name,
+				       const gchar *option_name,
+				       guint8 *event_id)
+{
+	guint id = 0;
+	FuNordicCfgChannelModule *mod;
+
+	*event_id = 0;
+	/* For generic operations */
+	if (module_name == NULL)
+		return TRUE;
+
+	for (id = 0; id < self->modules->len; id++) {
+		mod = g_ptr_array_index(self->modules, id);
+		if (!g_strcmp0(module_name, mod->name))
+			break;
+	}
+	if (id >= self->modules->len || id > 0x0f)
+		return FALSE;
+
+	*event_id = id << 4;
+	/* For generic module operations */
+	if (option_name == NULL)
+		return TRUE;
+
+	for (guint i = 0; i < mod->options->len && i <= 0x0f; i++) {
+		FuNordicCfgChannelModuleOption *opt = g_ptr_array_index(mod->options, i);
+		if (!g_strcmp0(option_name, opt->name)) {
+			*event_id = (id << 4) + opt->idx;
+			return TRUE;
+		}
+	}
+
+	/* module have no requested option */
+	return FALSE;
+}
+
+static gboolean
+fu_nordic_hid_cfg_channel_dfu_cmd_send_by_id(FuNordicDeviceCfgChannel *self,
+					     guint8 recipient,
+					     guint8 event_id,
+					     guint8 status,
+					     GError **error)
 {
 	g_autoptr(FuNordicCfgChannelMsg) msg = g_new0(FuNordicCfgChannelMsg, 1);
-	g_autoptr(FuNordicCfgChannelMsg) res = g_new0(FuNordicCfgChannelMsg, 1);
-	FuNordicCfgChannelRcvHelper helper;
 
 	msg->report_id = HID_REPORT_ID;
-	msg->recipient = 0;
-	msg->event_id = 0;
-	msg->status = CONFIG_STATUS_GET_BOARD_NAME;
+	msg->recipient = recipient;
+	msg->event_id = event_id;
+	msg->status = status;
 	msg->data_len = 0;
 	if (!fu_nordic_hid_cfg_channel_send(self, (guint8 *)msg, sizeof(*msg), error)) {
-		g_prefix_error(error, "Failed to get dev name (send): ");
+		g_prefix_error(error, "Failed to send: ");
 		return FALSE;
 	}
+
+	return TRUE;
+}
+
+static gboolean
+fu_nordic_hid_cfg_channel_dfu_cmd_send(FuNordicDeviceCfgChannel *self,
+				       guint8 recipient,
+				       const gchar *module_name,
+				       const gchar *option_name,
+				       guint8 status,
+				       GError **error)
+{
+	g_autoptr(FuNordicCfgChannelMsg) msg = g_new0(FuNordicCfgChannelMsg, 1);
+	guint8 event_id = 0;
+
+	if (!fu_nordic_hid_cfg_channel_get_event_id(self, module_name, option_name, &event_id)) {
+		g_set_error(error,
+			    FWUPD_ERROR,
+			    FWUPD_ERROR_NOT_SUPPORTED,
+			    "Requested non-existing module %s with option %s",
+			    module_name,
+			    option_name);
+		return FALSE;
+	}
+
+	if (!fu_nordic_hid_cfg_channel_dfu_cmd_send_by_id(self,
+							  recipient,
+							  event_id,
+							  status,
+							  error)) {
+		g_prefix_error(error, "Failed to send: ");
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
+static gboolean
+fu_nordic_hid_cfg_channel_dfu_cmd_receive(FuNordicDeviceCfgChannel *self,
+					  gboolean check_status,
+					  guint8 status,
+					  FuNordicCfgChannelMsg *res,
+					  GError **error)
+{
+	FuNordicCfgChannelRcvHelper helper;
+
 	res->report_id = HID_REPORT_ID;
-	helper.check_status = TRUE;
-	helper.status = CONFIG_STATUS_SUCCESS;
+	helper.check_status = check_status;
+	helper.status = status;
 	helper.buf = (guint8 *)res;
 	helper.size = sizeof(*res);
 	if (!fu_device_retry(FU_DEVICE(self),
@@ -182,9 +285,32 @@ fu_nordic_hid_cfg_channel_get_board_name(FuNordicDeviceCfgChannel *self,
 			     FU_NORDIC_HID_CFG_CHANNEL_RETRIES,
 			     &helper,
 			     error)) {
-		g_prefix_error(error, "Failed to get dev name (receive): ");
+		g_prefix_error(error, "Failed on receive: ");
 		return FALSE;
 	}
+
+	return TRUE;
+}
+
+static gboolean
+fu_nordic_hid_cfg_channel_get_board_name(FuNordicDeviceCfgChannel *self, GError **error)
+{
+	g_autoptr(FuNordicCfgChannelMsg) res = g_new0(FuNordicCfgChannelMsg, 1);
+
+	if (!fu_nordic_hid_cfg_channel_dfu_cmd_send(self,
+						    0,
+						    NULL,
+						    NULL,
+						    CONFIG_STATUS_GET_BOARD_NAME,
+						    error))
+		return FALSE;
+	if (!fu_nordic_hid_cfg_channel_dfu_cmd_receive(self,
+						       TRUE,
+						       CONFIG_STATUS_SUCCESS,
+						       res,
+						       error))
+		return FALSE;
+
 	self->board_name = g_strndup((gchar *)res->data, res->data_len);
 
 	return TRUE;
@@ -199,32 +325,22 @@ static gboolean
 fu_nordic_hid_cfg_channel_get_hwid(FuNordicDeviceCfgChannel *self,
 				      GError **error)
 {
-	g_autoptr(FuNordicCfgChannelMsg) msg = g_new0(FuNordicCfgChannelMsg, 1);
 	g_autoptr(FuNordicCfgChannelMsg) res = g_new0(FuNordicCfgChannelMsg, 1);
-	FuNordicCfgChannelRcvHelper helper;
 
-	msg->report_id = HID_REPORT_ID;
-	msg->recipient = 0;
-	msg->event_id = 0;
-	msg->status = CONFIG_STATUS_GET_HWID;
-	msg->data_len = 0;
-	if (!fu_nordic_hid_cfg_channel_send(self, (guint8 *)msg, sizeof(*msg), error)) {
-		g_prefix_error(error, "Failed to get hwid (send): ");
+	if (!fu_nordic_hid_cfg_channel_dfu_cmd_send(self,
+						    0,
+						    NULL,
+						    NULL,
+						    CONFIG_STATUS_GET_HWID,
+						    error))
 		return FALSE;
-	}
-	res->report_id = HID_REPORT_ID;
-	helper.check_status = TRUE;
-	helper.status = CONFIG_STATUS_SUCCESS;
-	helper.buf = (guint8 *)res;
-	helper.size = sizeof(*res);
-	if (!fu_device_retry(FU_DEVICE(self),
-			     fu_nordic_hid_cfg_channel_receive_cb,
-			     FU_NORDIC_HID_CFG_CHANNEL_RETRIES,
-			     &helper,
-			     error)) {
-		g_prefix_error(error, "Failed to get dev hwid (receive): ");
+	if (!fu_nordic_hid_cfg_channel_dfu_cmd_receive(self,
+						       TRUE,
+						       CONFIG_STATUS_SUCCESS,
+						       res,
+						       error))
 		return FALSE;
-	}
+
 	memcpy(self->hw_id, res->data, HWID_LEN);
 
 	return TRUE;
@@ -235,43 +351,30 @@ fu_nordic_hid_cfg_channel_load_module_opts(FuNordicDeviceCfgChannel *self,
 					      FuNordicCfgChannelModule *mod,
 					      GError **error)
 {
-	g_autoptr(FuNordicCfgChannelMsg) msg = g_new0(FuNordicCfgChannelMsg, 1);
-	g_autoptr(FuNordicCfgChannelMsg) res = g_new0(FuNordicCfgChannelMsg, 1);
-	guint i = 1; /* initial module idx */
+	guint i = 0; /* initial module idx */
 
 	while (TRUE) {
-		g_autoptr(FuNordicCfgChannelMsg) msg_aux = g_new0(FuNordicCfgChannelMsg, 1);
-		g_autoptr(FuNordicCfgChannelMsg) res_aux = g_new0(FuNordicCfgChannelMsg, 1);
 		FuNordicCfgChannelModuleOption *opt = NULL;
-		FuNordicCfgChannelRcvHelper helper_aux;
+		g_autoptr(FuNordicCfgChannelMsg) res = g_new0(FuNordicCfgChannelMsg, 1);
 
-		msg_aux->report_id = HID_REPORT_ID;
-		msg_aux->recipient = 0;
-		msg_aux->event_id = mod->idx << 4;
-		msg_aux->status = CONFIG_STATUS_FETCH;
-		msg_aux->data_len = 0;
-		if (!fu_nordic_hid_cfg_channel_send(self, (guint8 *)msg_aux, sizeof(*msg_aux), error)) {
-			g_prefix_error(error, "Failed to get module info for %s (send): ", mod->name);
+		if (!fu_nordic_hid_cfg_channel_dfu_cmd_send_by_id(self,
+								  0,
+								  mod->idx << 4,
+								  CONFIG_STATUS_FETCH,
+								  error))
 			return FALSE;
-		}
-		res_aux->report_id = HID_REPORT_ID;
-		helper_aux.check_status = TRUE;
-		helper_aux.status = CONFIG_STATUS_SUCCESS;
-		helper_aux.buf = (guint8 *)res_aux;
-		helper_aux.size = sizeof(*res_aux);
-		if (!fu_device_retry(FU_DEVICE(self),
-				     fu_nordic_hid_cfg_channel_receive_cb,
-				     FU_NORDIC_HID_CFG_CHANNEL_RETRIES,
-				     &helper_aux,
-				     error)) {
-			g_prefix_error(error, "Failed to get module info for %s (receive): ", mod->name);
+		if (!fu_nordic_hid_cfg_channel_dfu_cmd_receive(self,
+							       TRUE,
+							       CONFIG_STATUS_SUCCESS,
+							       res,
+							       error))
 			return FALSE;
-		}
-		/* res_aux->data: option name */
-		if (res_aux->data[0] == END_OF_TRANSFER_CHAR)
+
+		/* res->data: option name */
+		if (res->data[0] == END_OF_TRANSFER_CHAR)
 			break;
 		opt = g_new0(FuNordicCfgChannelModuleOption, 1);
-		opt->name = g_strndup((gchar *)res_aux->data, res_aux->data_len);
+		opt->name = g_strndup((gchar *)res->data, res->data_len);
 		opt->idx = i;
 		g_ptr_array_add(mod->options, opt);
 		i++;
@@ -330,32 +433,22 @@ static gboolean
 fu_nordic_hid_cfg_channel_get_modinfo(FuNordicDeviceCfgChannel *self,
 					 GError **error)
 {
-	g_autoptr(FuNordicCfgChannelMsg) msg = g_new0(FuNordicCfgChannelMsg, 1);
 	g_autoptr(FuNordicCfgChannelMsg) res = g_new0(FuNordicCfgChannelMsg, 1);
-	FuNordicCfgChannelRcvHelper helper;
 
-	msg->report_id = HID_REPORT_ID;
-	msg->recipient = 0;
-	msg->event_id = 0;
-	msg->status = CONFIG_STATUS_GET_MAX_MOD_ID;
-	msg->data_len = 0;
-	if (!fu_nordic_hid_cfg_channel_send(self, (guint8 *)msg, sizeof(*msg), error)) {
-		g_prefix_error(error, "Failed to get number of modules (send): ");
+	if (!fu_nordic_hid_cfg_channel_dfu_cmd_send(self,
+						    0,
+						    NULL,
+						    NULL,
+						    CONFIG_STATUS_GET_MAX_MOD_ID,
+						    error))
 		return FALSE;
-	}
-	res->report_id = HID_REPORT_ID;
-	helper.check_status = TRUE;
-	helper.status = CONFIG_STATUS_SUCCESS;
-	helper.buf = (guint8 *)res;
-	helper.size = sizeof(*res);
-	if (!fu_device_retry(FU_DEVICE(self),
-			     fu_nordic_hid_cfg_channel_receive_cb,
-			     FU_NORDIC_HID_CFG_CHANNEL_RETRIES,
-			     &helper,
-			     error)) {
-		g_prefix_error(error, "Failed to get number of modules (receive): ");
+	if (!fu_nordic_hid_cfg_channel_dfu_cmd_receive(self,
+						       TRUE,
+						       CONFIG_STATUS_SUCCESS,
+						       res,
+						       error))
 		return FALSE;
-	}
+
 	/* res->data[0]: maximum module idx */
 	self->modules = g_ptr_array_new();
 	for (guint i = 0; i <= res->data[0]; i++) {
@@ -365,6 +458,95 @@ fu_nordic_hid_cfg_channel_get_modinfo(FuNordicDeviceCfgChannel *self,
 
 	/* TODO: remove */
 	g_ptr_array_foreach(self->modules, print_mod_cb, NULL);
+	return TRUE;
+}
+
+static gboolean
+fu_nordic_hid_cfg_channel_dfu_fwinfo(FuNordicDeviceCfgChannel *self, GError **error)
+{
+	g_autoptr(FuNordicCfgChannelMsg) res = g_new0(FuNordicCfgChannelMsg, 1);
+
+	if (!fu_nordic_hid_cfg_channel_dfu_cmd_send(self,
+						    0,
+						    "dfu",
+						    "fwinfo",
+						    CONFIG_STATUS_FETCH,
+						    error))
+		return FALSE;
+	if (!fu_nordic_hid_cfg_channel_dfu_cmd_receive(self,
+						       TRUE,
+						       CONFIG_STATUS_SUCCESS,
+						       res,
+						       error))
+		return FALSE;
+
+	/* Parsing fwinfo answer */
+	self->flash_area_id = res->data[0];
+	if (!fu_common_read_uint32_safe(res->data,
+					REPORT_SIZE,
+					0x01,
+					&self->flashed_image_len,
+					G_LITTLE_ENDIAN,
+					error))
+		return FALSE;
+	self->ver_major = res->data[4];
+	self->ver_minor = res->data[5];
+	if (!fu_common_read_uint16_safe(res->data,
+					REPORT_SIZE,
+					0x07,
+					&self->ver_rev,
+					G_LITTLE_ENDIAN,
+					error))
+		return FALSE;
+	if (!fu_common_read_uint32_safe(res->data,
+					REPORT_SIZE,
+					0x09,
+					&self->ver_build_nr,
+					G_LITTLE_ENDIAN,
+					error))
+		return FALSE;
+
+	if (g_getenv("FWUPD_NORDIC_HID_VERBOSE") != NULL) {
+		g_log(G_LOG_DOMAIN, G_LOG_LEVEL_DEBUG, "Flash area ID: %u", self->flash_area_id);
+		g_log(G_LOG_DOMAIN,
+		      G_LOG_LEVEL_DEBUG,
+		      "Flashed image size: %u",
+		      self->flashed_image_len);
+		g_log(G_LOG_DOMAIN,
+		      G_LOG_LEVEL_DEBUG,
+		      "Image version: %u.%u.%u.%u",
+		      self->ver_major,
+		      self->ver_minor,
+		      self->ver_rev,
+		      self->ver_build_nr);
+	}
+
+	return TRUE;
+}
+
+static gboolean
+fu_nordic_hid_cfg_channel_dfu_reboot(FuNordicDeviceCfgChannel *self, GError **error)
+{
+	g_autoptr(FuNordicCfgChannelMsg) res = g_new0(FuNordicCfgChannelMsg, 1);
+
+	if (!fu_nordic_hid_cfg_channel_dfu_cmd_send(self,
+						    0,
+						    "dfu",
+						    "reboot",
+						    CONFIG_STATUS_FETCH,
+						    error))
+		return FALSE;
+	if (!fu_nordic_hid_cfg_channel_dfu_cmd_receive(self,
+						       TRUE,
+						       CONFIG_STATUS_SUCCESS,
+						       res,
+						       error))
+		return FALSE;
+
+	if (res->data_len != 1 || res->data[0] != 0x01) {
+		return FALSE;
+	}
+
 	return TRUE;
 }
 
@@ -382,6 +564,7 @@ static gboolean
 fu_nordic_hid_cfg_channel_setup(FuDevice *device, GError **error)
 {
 	FuNordicDeviceCfgChannel *self = FU_NORDIC_HID_CFG_CHANNEL(device);
+	g_autofree gchar *version = NULL;
 
 	/* get device info */
 	if (!fu_nordic_hid_cfg_channel_get_board_name(self, error))
@@ -390,8 +573,27 @@ fu_nordic_hid_cfg_channel_setup(FuDevice *device, GError **error)
 		return FALSE;
 	if (!fu_nordic_hid_cfg_channel_get_modinfo(self, error))
 		return FALSE;
+	if (!fu_nordic_hid_cfg_channel_dfu_fwinfo(self, error))
+		return FALSE;
+
+	version = g_strdup_printf("%u.%u.%u.%u",
+				  self->ver_major,
+				  self->ver_minor,
+				  self->ver_rev,
+				  self->ver_build_nr);
+	fu_device_set_version(FU_DEVICE(device), version);
 
 	return TRUE;
+}
+
+static void
+fu_nordic_hid_cfg_channel_set_progress(FuDevice *self, FuProgress *progress)
+{
+	fu_progress_set_id(progress, G_STRLOC);
+	fu_progress_add_step(progress, FWUPD_STATUS_DEVICE_RESTART, 1); /* detach */
+	fu_progress_add_step(progress, FWUPD_STATUS_DEVICE_WRITE, 97);	/* write */
+	fu_progress_add_step(progress, FWUPD_STATUS_DEVICE_RESTART, 1); /* attach */
+	fu_progress_add_step(progress, FWUPD_STATUS_DEVICE_BUSY, 1);	/* reload */
 }
 
 static void
@@ -400,6 +602,27 @@ fu_nordic_hid_cfg_channel_to_string(FuDevice *device, guint idt, GString *str)
 	FuNordicDeviceCfgChannel *self = FU_NORDIC_HID_CFG_CHANNEL(device);
 
 	fu_common_string_append_kv(str, idt, "BoardName", self->board_name);
+}
+
+static gboolean
+fu_nordic_hid_cfg_channel_write_firmware(FuDevice *device,
+					 FuFirmware *firmware,
+					 FuProgress *progress,
+					 FwupdInstallFlags flags,
+					 GError **error)
+{
+	FuNordicDeviceCfgChannel *self = FU_NORDIC_HID_CFG_CHANNEL(device);
+	g_autoptr(GBytes) blob = NULL;
+	g_autoptr(GPtrArray) chunks = NULL;
+
+	blob = fu_firmware_get_bytes(firmware, error);
+	if (blob == NULL)
+		return FALSE;
+
+	chunks = fu_chunk_array_new_from_bytes(blob, 0, 0, REPORT_SIZE);
+
+	g_warning("RESET");
+	return fu_nordic_hid_cfg_channel_dfu_reboot(self, error);
 }
 
 static void
@@ -439,6 +662,8 @@ fu_nordic_hid_cfg_channel_class_init(FuNordicDeviceCfgChannelClass *klass)
 	klass_device->probe = fu_nordic_hid_cfg_channel_probe;
 	klass_device->setup = fu_nordic_hid_cfg_channel_setup;
 	klass_device->to_string = fu_nordic_hid_cfg_channel_to_string;
+	klass_device->write_firmware = fu_nordic_hid_cfg_channel_write_firmware;
+	klass_device->set_progress = fu_nordic_hid_cfg_channel_set_progress;
 	object_class->finalize = fu_nordic_hid_cfg_channel_finalize;
 }
 
@@ -447,7 +672,7 @@ fu_nordic_hid_cfg_channel_init(FuNordicDeviceCfgChannel *self)
 {
 	fu_device_set_vendor(FU_DEVICE(self), "Nordic");
 	fu_device_add_flag(FU_DEVICE(self), FWUPD_DEVICE_FLAG_UPDATABLE);
-	fu_device_set_version_format(FU_DEVICE(self), FWUPD_VERSION_FORMAT_PLAIN);
+	fu_device_set_version_format(FU_DEVICE(self), FWUPD_VERSION_FORMAT_QUAD);
 	fu_device_add_protocol(FU_DEVICE(self), "com.nordic.nrf.cfgchannel");
 	fu_device_retry_set_delay(FU_DEVICE(self), FU_NORDIC_HID_CFG_CHANNEL_RETRY_DELAY);
 }
