@@ -9,16 +9,16 @@
 #include <fwupdplugin.h>
 #include "fu-nordic-hid-cfg-channel.h"
 
-gboolean
-fu_plugin_startup(FuPlugin *plugin, GError **error)
+static void
+fu_plugin_nordic_hid_init(FuPlugin *plugin)
 {
-	return TRUE;
+	fu_plugin_add_udev_subsystem(plugin, "hidraw");
+	fu_plugin_add_device_gtype(plugin, FU_TYPE_NORDIC_HID_CFG_CHANNEL);
 }
 
 void
-fu_plugin_init(FuPlugin *plugin)
+fu_plugin_init_vfuncs(FuPluginVfuncs *vfuncs)
 {
-	fu_plugin_set_build_hash(plugin, FU_BUILD_HASH);
-	fu_plugin_add_udev_subsystem(plugin, "hidraw");
-	fu_plugin_add_device_gtype(plugin, FU_TYPE_NORDIC_HID_CFG_CHANNEL);
+	vfuncs->build_hash = FU_BUILD_HASH;
+	vfuncs->init = fu_plugin_nordic_hid_init;
 }
