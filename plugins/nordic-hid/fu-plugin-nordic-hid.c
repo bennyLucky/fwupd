@@ -7,13 +7,16 @@
 #include "config.h"
 
 #include <fwupdplugin.h>
+
 #include "fu-nordic-hid-cfg-channel.h"
+#include "fu-nordic-hid-firmware.h"
 
 static void
 fu_plugin_nordic_hid_init(FuPlugin *plugin)
 {
 	fu_plugin_add_udev_subsystem(plugin, "hidraw");
 	fu_plugin_add_device_gtype(plugin, FU_TYPE_NORDIC_HID_CFG_CHANNEL);
+	fu_plugin_add_firmware_gtype(plugin, "nordic-hid", FU_TYPE_NORDIC_HID_FIRMWARE);
 }
 
 void

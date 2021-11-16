@@ -13,6 +13,7 @@ shared_module('fu_plugin_nordic_hid',
   sources : [
     'fu-plugin-nordic-hid.c',
     'fu-nordic-hid-cfg-channel.c',
+    'fu-nordic-hid-firmware.c',
   ],
   include_directories : [
     root_incdir,
