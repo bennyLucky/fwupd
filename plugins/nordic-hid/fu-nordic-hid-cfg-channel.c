@@ -734,6 +734,7 @@ fu_nordic_hid_cfg_channel_setup(FuDevice *device, GError **error)
 {
 	FuNordicDeviceCfgChannel *self = FU_NORDIC_HID_CFG_CHANNEL(device);
 	g_autofree gchar *version = NULL;
+	g_autofree gchar *physical_id = NULL;
 
 	/* get device info */
 	if (!fu_nordic_hid_cfg_channel_get_board_name(self, error))
@@ -751,6 +752,20 @@ fu_nordic_hid_cfg_channel_setup(FuDevice *device, GError **error)
 				  self->ver_rev,
 				  self->ver_build_nr);
 	fu_device_set_version(FU_DEVICE(device), version);
+
+	/* Allows to detect the single device connected via several interfaces */
+	physical_id = g_strdup_printf("%s-%s-%02x%02x%02x%02x%02x%02x%02x%02x",
+				      self->board_name,
+				      version,
+				      self->hw_id[0],
+				      self->hw_id[1],
+				      self->hw_id[2],
+				      self->hw_id[3],
+				      self->hw_id[4],
+				      self->hw_id[5],
+				      self->hw_id[6],
+				      self->hw_id[7]);
+	fu_device_set_physical_id(device, physical_id);
 
 	return TRUE;
 }
